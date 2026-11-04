@@ -140,8 +140,13 @@ impl<S: 'static> Runtime<S> {
         self.release_hover_hold();
         self.drop_scroll_holds();
         let (id, page, stick) = (self.nodes[i].id, f64::from(self.nodes[i].local.h * 0.9), self.nodes[i].scroll.is_some_and(|s| s.stick_bottom));
+        // From the content's top, so Home reaches it from below a virtual list's origin.
+        let origin = self.origin_of(i);
+        let Some(st) = self.scrolls.get(&id) else { return false };
+        let to = to(st.offset + origin, st.max + origin, page).max(0.0);
+        let to = self.laid_offset(id, to);
         let Some(st) = self.scrolls.get_mut(&id) else { return false };
-        st.offset = to(st.offset, st.max, page).clamp(0.0, st.max);
+        st.offset = to.min(st.max);
         st.v = 0.0;
         st.glide = None;
         st.direct = true;

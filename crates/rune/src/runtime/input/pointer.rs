@@ -390,16 +390,20 @@ impl<S: 'static> Runtime<S> {
         self.drop_scroll_holds();
         self.dismiss_help();
         let Some(id) = self.scroll_at(x, y) else { return };
-        let stick = self.node_index.get(&id).and_then(|&i| self.nodes[i].scroll).is_some_and(|s| s.stick_bottom);
+        let Some(&i) = self.node_index.get(&id) else { return };
+        let stick = self.nodes[i].scroll.is_some_and(|s| s.stick_bottom);
+        let Some(before) = self.scrolls.get(&id).map(|st| st.offset + self.origin_of(i)) else { return };
+        // From the content's top: one turn can carry the offset above a virtual list's origin.
+        let to = self.laid_offset(id, (before - f64::from(dy)).max(0.0));
+        let origin = self.origin_of(i);
         if let Some(st) = self.scrolls.get_mut(&id) {
-            let before = st.offset;
-            st.offset = (st.offset - f64::from(dy)).clamp(0.0, st.max);
+            st.offset = to.min(st.max);
             st.v = 0.0;
             st.glide = None;
             st.direct = true;
             st.pinned = stick && st.offset >= st.max - 0.5;
             log_event!(self, "wheel {dy:.1}");
-            if st.offset != before { self.scroll_cancels_press(id); }
+            if st.offset + origin != before { self.scroll_cancels_press(id); }
         }
     }
 

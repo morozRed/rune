@@ -324,7 +324,7 @@ impl<S: 'static> Runtime<S> {
                 None
             };
             if let Some(v) = parent_virtual {
-                scene_rect.y -= v.before;
+                scene_rect.y -= v.laid_before();
             }
             let old = last.find(&self.nodes, id);
             if can_skip_apply

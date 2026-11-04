@@ -139,7 +139,10 @@ impl<S: 'static> Runtime<S> {
         let mut count = 0usize;
         let rows: f64 = stack.order.iter().filter_map(|id| self.grows.get(id)).map(|g| { count += 1; f64::from(g.h) }).sum();
         let gaps = f64::from(stack.gap) * count.saturating_sub(1) as f64;
-        Some(f64::from(stack.pad_top) + rows + gaps + f64::from(stack.pad_bottom))
+        // A virtual list's space below its window can be too long for the f32 layout to hold
+        // to the point: take it from the list.
+        let below = self.virtuals.get(&n.path).map_or(f64::from(stack.pad_bottom), |v| f64::from(v.pad_bottom) + v.after);
+        Some(f64::from(stack.pad_top) + rows + gaps + below)
     }
 
     /// How far scroll viewport `i`'s content reaches past its bottom, negative while it fits.

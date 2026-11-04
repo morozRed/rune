@@ -194,17 +194,19 @@ impl<S: 'static> Measurement<'_, S> {
             let sticky = self.nodes[scroll_idx].scroll.unwrap().stick_bottom;
             let old_scroll = self.scrolls.get(&scroll_id);
             let pinned = old_scroll.map_or(sticky, |s| s.pinned);
-            let mut offset = old_scroll.map_or(0.0, |s| s.offset as f32);
             v.viewport = self.nodes[scroll_idx].local.h;
-            offset = (offset - v.top).max(0.0);
+            let (origin, mut offset) = (v.origin, v.list_offset(old_scroll.map_or(0.0, |s| s.offset)));
             v.anchor = if pinned { None } else { v.first_visible(offset, |_| true) };
             let delta = v.anchor_delta();
             offset = (offset + delta).max(0.0);
             if let Some(st) = self.scrolls.get_mut(&scroll_id) && !pinned {
-                st.offset = (st.offset + f64::from(delta)).max(0.0);
+                st.offset = (st.offset + delta).max(0.0);
             }
             let shown = std::mem::take(&mut v.shown);
             v.select(offset, pinned, Some(&shown));
+            if v.origin != origin && let Some(st) = self.scrolls.get_mut(&scroll_id) {
+                st.rebase(v.origin - origin);
+            }
             for key in shown.iter().filter(|k| v.index_of(k).is_some_and(|i| !v.range.contains(&i))) {
                 self.virtual_culled.insert(format!("{path}/{key}"));
             }
@@ -236,8 +238,8 @@ impl<S: 'static> Measurement<'_, S> {
                 old_list_idx,
                 list_subtree_end,
                 range: v.range.clone(),
-                pad_top: v.pad_top + v.before,
-                pad_bottom: v.pad_bottom + v.after,
+                pad_top: v.pad_top + v.laid_before(),
+                pad_bottom: v.pad_bottom + v.after as f32,
                 mounted_rows,
                 focused,
                 pinned: pinned_rows,

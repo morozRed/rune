@@ -110,11 +110,19 @@ pub(crate) struct VirtualList {
     row_heights: Vec<f32>,
     /// Running totals of `row_heights` (one longer), rebuilt when one changes. Every frame reads
     /// them, so a long list doesn't hash every key to find its window.
-    sums: RefCell<Vec<f32>>,
+    sums: RefCell<Vec<f64>>,
     sums_stale: Cell<bool>,
     pub range: Range<usize>,
-    pub before: f32,
-    pub after: f32,
+    /// The space above and below the mounted rows. Positions in the list are f64: an f32 is
+    /// 16 points coarse 158M points down, where 4.4M rows of 36 points end.
+    pub before: f64,
+    pub after: f64,
+    /// How far down the rows the layout begins ([`origin_for`]): the space above the window is
+    /// laid out less this, and the scroll viewport's offset counts from here, so layout and
+    /// drawing in f32 stay exact however far down the window is.
+    pub origin: f64,
+    /// The only virtual list in its scroll viewport: one with a sibling list keeps `origin` 0.
+    pub alone: bool,
     estimate: f32,
     /// Rows are built by index (`El::virtual_rows`), so a commit costs only the rows it mounts.
     /// Such a list moves its window in small steps and spreads rows new to it over frames.
@@ -139,7 +147,7 @@ pub(crate) struct VirtualList {
     pub pad_top: f32,
     pub pad_bottom: f32,
     gap: f32,
-    pub anchor: Option<(String, f32)>,
+    pub anchor: Option<(String, f64)>,
     /// The `El::virtual_rows_version` that `keys` came with.
     pub keys_version: Option<u64>,
     /// The visible row range last sent to `El::on_visible_rows`.
@@ -241,6 +249,21 @@ const INDEXED_EDGE: f32 = 1.75;
 /// Rows past it mount over the next frames, so a jump or a prepended page doesn't shape it all
 /// in one frame.
 const INDEXED_BUDGET: f32 = 0.5;
+/// A list's layout origin moves in steps this long (points), so it moves rarely, and the
+/// mounted rows lie between one and two steps below it: under 2^18 points, where an f32 is
+/// finer than 1/32 point, and far enough below that a scroll up never meets the layout's top.
+const ORIGIN_STEP: f64 = 65_536.0;
+
+/// The layout origin for a window `before` points down the rows: zero near the top.
+pub(crate) fn origin_for(before: f64) -> f64 {
+    if before < 2.0 * ORIGIN_STEP { 0.0 } else { (before / ORIGIN_STEP).floor() * ORIGIN_STEP - ORIGIN_STEP }
+}
+
+/// The layout origin of the virtual list scroll viewport `scroll_path` scrolls, if any.
+pub(crate) fn scroll_origin(virtuals: &HashMap<String, VirtualList>, scroll_path: &str) -> f64 {
+    if virtuals.is_empty() { return 0.0; }
+    virtuals.values().find(|v| v.scroll_path == scroll_path).map_or(0.0, |v| v.origin)
+}
 
 impl VirtualList {
     pub fn height(&self, key: &str) -> f32 {
@@ -326,7 +349,7 @@ impl VirtualList {
     /// Replaces the rows. Keys that stay keep their measured height and birth; new ones are born
     /// at `commit`. Returns the first row visible at `offset` (when given) that stays, with its
     /// top before the change, to anchor the reader to: none when no row in view stays.
-    pub fn set_keys(&mut self, keys: Vec<String>, commit: u64, offset: Option<f32>) -> Option<(String, f32)> {
+    pub fn set_keys(&mut self, keys: Vec<String>, commit: u64, offset: Option<f64>) -> Option<(String, f64)> {
         let mut rows = HashMap::with_capacity_and_hasher(keys.len(), Default::default());
         let mut born = Vec::with_capacity(keys.len());
         let mut heights = Vec::with_capacity(keys.len());
@@ -339,7 +362,7 @@ impl VirtualList {
         }
         // A change that keeps none of the rows in view (a filter) leaves nothing to hold.
         let anchor = offset.and_then(|offset| self.first_visible(offset, |k| rows.contains_key(k)))
-            .filter(|(_, top)| offset.is_some_and(|offset| *top < offset + self.viewport));
+            .filter(|(_, top)| offset.is_some_and(|offset| *top < offset + f64::from(self.viewport)));
         let changed = match &self.keys {
             RowKeys::Stored(old) => *old != keys,
             RowKeys::Positional(_) => true,
@@ -361,13 +384,13 @@ impl VirtualList {
     /// Makes the rows `count` positional rows: row `i` keyed `i`. Rows that stay keep their
     /// heights and the rest are born at `commit`, at a cost independent of `count`. Returns the
     /// anchor as [`set_keys`](Self::set_keys) does.
-    pub fn set_count(&mut self, count: usize, commit: u64, offset: Option<f32>) -> Option<(String, f32)> {
+    pub fn set_count(&mut self, count: usize, commit: u64, offset: Option<f64>) -> Option<(String, f64)> {
         let positional = self.keys.is_positional();
         let kept = if positional { self.keys.len().min(count) } else { 0 };
         let anchor = offset.and_then(|offset| {
             let first = self.rows_above(offset);
-            let top = self.pad_top + self.sum(first);
-            (first < kept && top < offset + self.viewport).then(|| (first.to_string(), top))
+            let top = f64::from(self.pad_top) + self.sum(first);
+            (first < kept && top < offset + f64::from(self.viewport)).then(|| (first.to_string(), top))
         });
         if self.keys != RowKeys::Positional(count) {
             self.keys_fresh = true;
@@ -429,14 +452,14 @@ impl VirtualList {
     }
 
     /// Stored rows' running totals of `row_heights` and gaps, one longer than the rows.
-    fn sums(&self) -> Ref<'_, Vec<f32>> {
+    fn sums(&self) -> Ref<'_, Vec<f64>> {
         if self.sums_stale.replace(false) || self.sums.borrow().len() != self.row_heights.len() + 1 {
             let mut sums = self.sums.borrow_mut();
             sums.clear();
             sums.push(0.0);
             let mut y = 0.0;
             for h in &self.row_heights {
-                y += h + self.gap;
+                y += f64::from(h + self.gap);
                 sums.push(y);
             }
         }
@@ -458,72 +481,84 @@ impl VirtualList {
     }
 
     /// The heights and gaps of the rows above row `i`: its top below the first row's.
-    fn sum(&self, i: usize) -> f32 {
+    fn sum(&self, i: usize) -> f64 {
         match self.keys {
             RowKeys::Stored(_) => self.sums()[i],
             RowKeys::Positional(_) => {
                 let sums = self.tall_sums();
                 let above = sums.partition_point(|&(j, _)| j < i);
                 let extra = if above == 0 { 0.0 } else { sums[above - 1].1 };
-                (i as f64 * f64::from(self.estimate + self.gap) + extra) as f32
+                i as f64 * f64::from(self.estimate + self.gap) + extra
             }
         }
     }
 
     /// How many rows end at or above `y`: the index of the first row still showing at `y`.
-    fn rows_above(&self, y: f32) -> usize {
-        partition(self.keys.len(), |i| self.pad_top + self.sum(i + 1) - self.gap <= y)
+    fn rows_above(&self, y: f64) -> usize {
+        let (pad, gap) = (f64::from(self.pad_top), f64::from(self.gap));
+        partition(self.keys.len(), |i| pad + self.sum(i + 1) - gap <= y)
     }
 
     /// How many rows start above `y`.
-    fn rows_starting_above(&self, y: f32) -> usize {
-        partition(self.keys.len(), |i| self.pad_top + self.sum(i) < y)
+    fn rows_starting_above(&self, y: f64) -> usize {
+        partition(self.keys.len(), |i| f64::from(self.pad_top) + self.sum(i) < y)
     }
 
-    pub fn prefix(&self, end: usize) -> f32 {
-        if end == 0 || end < self.keys.len() { self.sum(end) } else { self.sum(end) - self.gap }
+    pub fn prefix(&self, end: usize) -> f64 {
+        if end == 0 || end < self.keys.len() { self.sum(end) } else { self.sum(end) - f64::from(self.gap) }
     }
 
     /// The bottom of the first `end` rows (without the gap after row `end - 1`).
-    pub fn row_end(&self, end: usize) -> f32 {
-        if end == 0 { 0.0 } else { self.sum(end) - self.gap }
+    pub fn row_end(&self, end: usize) -> f64 {
+        if end == 0 { 0.0 } else { self.sum(end) - f64::from(self.gap) }
     }
 
     /// The first row still visible at `offset`, among those `keep` accepts, and its top.
-    pub fn first_visible(&self, offset: f32, keep: impl Fn(&str) -> bool) -> Option<(String, f32)> {
+    pub fn first_visible(&self, offset: f64, keep: impl Fn(&str) -> bool) -> Option<(String, f64)> {
         let first = self.rows_above(offset);
         (first..self.keys.len())
             .find(|&i| keep(&self.keys.key(i)))
-            .map(|i| (self.keys.key(i).into_owned(), self.pad_top + self.sum(i)))
+            .map(|i| (self.keys.key(i).into_owned(), f64::from(self.pad_top) + self.sum(i)))
     }
 
     /// The furthest the rows can scroll: their extent less the viewport.
-    pub fn max_offset(&self) -> f32 {
-        (self.pad_top + self.prefix(self.keys.len()) + self.pad_bottom - self.viewport).max(0.0)
+    pub fn max_offset(&self) -> f64 {
+        (f64::from(self.pad_top) + self.prefix(self.keys.len()) + f64::from(self.pad_bottom) - f64::from(self.viewport)).max(0.0)
+    }
+
+    /// The offset into the rows, from the list's top, of its scroll viewport's offset `scroll`,
+    /// which counts from the layout's origin.
+    pub fn list_offset(&self, scroll: f64) -> f64 {
+        (scroll + self.origin - f64::from(self.top)).max(0.0)
+    }
+
+    /// The space above the mounted rows as laid out: `before` less the origin.
+    pub fn laid_before(&self) -> f32 {
+        (self.before - self.origin) as f32
     }
 
     /// The row index range intersecting the scroll viewport (`offset .. offset + viewport`).
-    pub fn visible_range(&self, offset: f32, pinned: bool) -> Range<usize> {
+    pub fn visible_range(&self, offset: f64, pinned: bool) -> Range<usize> {
         if self.keys.is_empty() {
             return 0..0;
         }
         let offset = if pinned { self.max_offset() } else { offset.clamp(0.0, self.max_offset()) };
         let start = self.rows_above(offset);
-        let end = self.rows_starting_above(offset + self.viewport).max(start);
+        let end = self.rows_starting_above(offset + f64::from(self.viewport)).max(start);
         start..end
     }
 
     /// Picks the rows to mount for `offset`, clamped to the rows' extent. With `budget` (the
     /// rows shown last commit), at most [`INDEXED_BUDGET`] of rows not among them mount per
     /// side beyond the viewport.
-    pub fn select(&mut self, offset: f32, pinned: bool, budget: Option<&HashSet<String>>) {
+    pub fn select(&mut self, offset: f64, pinned: bool, budget: Option<&HashSet<String>>) {
         let offset = if pinned { self.max_offset() } else { offset.min(self.max_offset()) };
         let (start, end) = self.overscan(offset);
         let (mut start, mut end) = if let Some(shown) = budget.filter(|_| !pinned) {
             let mounted = |i: usize| shown.contains(self.keys.key(i).as_ref());
             // The viewport's own rows always mount; the overscan takes new rows up to a budget.
             let first = self.rows_above(offset).max(start);
-            let last = self.rows_starting_above(offset + self.viewport).max(first);
+            let last = self.rows_starting_above(offset + f64::from(self.viewport)).max(first);
             let budget = self.viewport * INDEXED_BUDGET;
             let mut spent = 0.0;
             let mut from = first;
@@ -551,9 +586,10 @@ impl VirtualList {
         // Rows drawn in the viewport stay while motion still shows them where layout has moved
         // them out (rows below a fold gliding open), within an overscan of the window.
         let (mut lo, mut hi) = (start, end);
+        let reach = f64::from(self.viewport * OVERSCAN);
         for i in self.drawn.iter().filter_map(|k| self.index_of(k)) {
-            if i < start && self.prefix(start) - self.prefix(i) <= self.viewport * OVERSCAN { lo = lo.min(i); }
-            if i >= end && self.row_end(i + 1) - self.row_end(end) <= self.viewport * OVERSCAN { hi = hi.max(i + 1); }
+            if i < start && self.prefix(start) - self.prefix(i) <= reach { lo = lo.min(i); }
+            if i >= end && self.row_end(i + 1) - self.row_end(end) <= reach { hi = hi.max(i + 1); }
         }
         (start, end) = (lo, hi);
         // A row still at its estimate grows or shrinks once measured; anchoring to it would move
@@ -566,7 +602,7 @@ impl VirtualList {
 
     /// Keeps the rows mounted now (clamped to the rows), sets the anchor for `offset` as
     /// [`select`](Self::select) does, and re-derives the space above and below them.
-    pub fn hold(&mut self, offset: f32, pinned: bool) {
+    pub fn hold(&mut self, offset: f64, pinned: bool) {
         let offset = if pinned { self.max_offset() } else { offset.min(self.max_offset()) };
         self.anchor = if pinned { None } else { self.anchor_at(offset) };
         let len = self.keys.len();
@@ -579,47 +615,54 @@ impl VirtualList {
         self.range = start..end;
         self.before = self.prefix(start);
         self.after = if start < end { total - self.row_end(end) } else { total - self.before };
+        self.origin = if self.alone { origin_for(self.before) } else { 0.0 };
     }
 
-    fn anchor_at(&self, offset: f32) -> Option<(String, f32)> {
+    /// Mounts every row (a full measurement): nothing above or below, and the origin at the top.
+    pub fn mount_all(&mut self) {
+        self.range = 0..self.keys.len();
+        (self.before, self.after, self.origin) = (0.0, 0.0, 0.0);
+    }
+
+    fn anchor_at(&self, offset: f64) -> Option<(String, f64)> {
         let range = self.visible_range(offset, false);
         range.into_iter().find(|&i| self.measured(i))
-            .map(|i| (self.keys.key(i).into_owned(), self.pad_top + self.sum(i)))
+            .map(|i| (self.keys.key(i).into_owned(), f64::from(self.pad_top) + self.sum(i)))
             .or_else(|| self.first_visible(offset, |_| true))
     }
 
     /// The rows within the overscan around `offset`: rows ending at or above its top go, rows
     /// starting above its bottom stay.
-    fn overscan(&self, offset: f32) -> (usize, usize) {
-        let lo = offset - self.viewport * OVERSCAN;
-        let hi = offset + self.viewport * (1.0 + OVERSCAN);
+    fn overscan(&self, offset: f64) -> (usize, usize) {
+        let lo = offset - f64::from(self.viewport * OVERSCAN);
+        let hi = offset + f64::from(self.viewport * (1.0 + OVERSCAN));
         (self.rows_above(lo), self.rows_starting_above(hi))
     }
 
     /// How tall the mounted rows outside the overscan around `offset` are: rows that grew since
     /// the window was picked and lay out for nothing.
-    pub(crate) fn spare(&self, offset: f32, pinned: bool) -> f32 {
+    pub(crate) fn spare(&self, offset: f64, pinned: bool) -> f32 {
         if pinned || self.keys.is_empty() { return 0.0; }
         let (start, end) = self.overscan(offset.min(self.max_offset()));
         let above = self.prefix(start.min(self.range.end)) - self.prefix(self.range.start.min(start));
         let below = self.row_end(self.range.end) - self.row_end(end.max(self.range.start).min(self.range.end));
-        above.max(0.0) + below.max(0.0)
+        (above.max(0.0) + below.max(0.0)) as f32
     }
 
-    pub fn anchor_delta(&self) -> f32 {
+    pub fn anchor_delta(&self) -> f64 {
         let Some((key, old)) = &self.anchor else { return 0.0 };
         let Some(i) = self.index_of(key) else { return 0.0 };
-        self.pad_top + self.prefix(i) - old
+        f64::from(self.pad_top) + self.prefix(i) - old
     }
 
-    pub fn needs_window(&self, offset: f32, pinned: bool) -> bool {
+    pub fn needs_window(&self, offset: f64, pinned: bool) -> bool {
         if self.keys.is_empty() { return false; }
         if pinned { return self.range.end != self.keys.len(); }
-        let edge = self.viewport * if self.indexed { INDEXED_EDGE } else { 0.5 };
-        let top = self.pad_top + self.before;
-        let bottom = self.pad_top + self.row_end(self.range.end);
+        let edge = f64::from(self.viewport * if self.indexed { INDEXED_EDGE } else { 0.5 });
+        let top = f64::from(self.pad_top) + self.before;
+        let bottom = f64::from(self.pad_top) + self.row_end(self.range.end);
         (self.range.start > 0 && offset < top + edge)
-            || (self.range.end < self.keys.len() && offset + self.viewport > bottom - edge)
+            || (self.range.end < self.keys.len() && offset + f64::from(self.viewport) > bottom - edge)
     }
 }
 
@@ -652,9 +695,9 @@ mod tests {
         assert_eq!(v.first_visible(21.0, |_| true), Some(("r1".into(), 27.0)));
         v.select(1350.0, false, None);
         let n = v.range.len();
-        let mounted = n as f32 * 20.0 + n.saturating_sub(1) as f32 * 7.0;
+        let mounted = n as f64 * 20.0 + n.saturating_sub(1) as f64 * 7.0;
         assert_eq!(v.before + mounted + v.after, 2693.0);
-        assert_eq!(v.before, v.range.start as f32 * 27.0);
+        assert_eq!(v.before, v.range.start as f64 * 27.0);
         v.set_height("r0", 35.0);
         assert_eq!(v.prefix(50), 1365.0, "measured heights replace only the estimate, not the gap");
         v.set_gap(3.0);

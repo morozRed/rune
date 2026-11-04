@@ -24,14 +24,15 @@ impl<S: 'static> Runtime<S> {
         // This frame's commit may have changed the content: measure the extent first.
         self.step_scroll(0.0);
         let animate = !self.reduced_motion && !self.settled;
-        // Jumps: (viewport, horizontal, offset), reapplied once virtual rows land.
+        // Jumps: (viewport, horizontal, offset from the content's top), reapplied once virtual
+        // rows land.
         let mut jumps = Vec::new();
         // Anchored jumps, placed again from the new layout once virtual rows land.
         let mut anchors = Vec::new();
         for r in requests {
             if r.anchor {
                 let Some((i, to)) = self.anchor_offset(&r.key, r.y.unwrap_or(0.0)) else { continue };
-                jumps.push((self.nodes[i].id, false, to));
+                jumps.push((self.nodes[i].id, false, to + self.origin_of(i)));
                 anchors.push((jumps.len() - 1, r.key, r.y.unwrap_or(0.0)));
                 if let Some(st) = self.scrolls.get_mut(&self.nodes[i].id) {
                     st.v = 0.0;
@@ -42,6 +43,7 @@ impl<S: 'static> Runtime<S> {
             }
             let Some(i) = self.scroll_viewport_on(&r.key, r.x.is_some(), r.y.is_some()) else { continue };
             let (id, axes) = (self.nodes[i].id, self.nodes[i].scroll_axes);
+            let glide_y = r.y.filter(|_| axes.y() && r.glide.is_some() && animate).map(|y| self.laid_offset(id, f64::from(y).max(0.0)));
             let (view_w, view_h) = (f64::from(self.nodes[i].local.w), f64::from(self.nodes[i].local.h));
             let Some(st) = self.scrolls.get_mut(&id) else { continue };
             let glide = r.glide.filter(|_| animate);
@@ -62,9 +64,8 @@ impl<S: 'static> Runtime<S> {
                 }
             }
             if let Some(y) = r.y.filter(|_| axes.y()) {
-                let to = f64::from(y).max(0.0);
                 st.v = 0.0;
-                if let Some(spring) = glide && (to.min(st.max) - st.offset).abs() > 0.5 {
+                if let Some(spring) = glide && let Some(to) = glide_y && (to.min(st.max) - st.offset).abs() > 0.5 {
                     let reach = scroll_bottom::GLIDE_REACH * view_h;
                     let end = to.min(st.max);
                     st.offset = st.offset.clamp(end - reach, end + reach);
@@ -75,7 +76,7 @@ impl<S: 'static> Runtime<S> {
                 } else {
                     st.glide = None;
                     st.glide_to = None;
-                    jumps.push((id, false, to));
+                    jumps.push((id, false, f64::from(y).max(0.0)));
                 }
             }
         }
@@ -86,7 +87,7 @@ impl<S: 'static> Runtime<S> {
             self.commit(&Tx::default());
             self.step_scroll(0.0);
             for (j, key, at) in &anchors {
-                if let Some((_, to)) = self.anchor_offset(key, *at) { jumps[*j].2 = to; }
+                if let Some((i, to)) = self.anchor_offset(key, *at) { jumps[*j].2 = to + self.origin_of(i); }
             }
             self.apply_jumps(&jumps);
         }
@@ -94,6 +95,7 @@ impl<S: 'static> Runtime<S> {
 
     fn apply_jumps(&mut self, jumps: &[(NodeId, bool, f64)]) {
         for &(id, horizontal, to) in jumps {
+            let to = if horizontal { to } else { self.laid_offset(id, to) };
             let stick = self.nodes.iter().find(|n| n.id == id).and_then(|n| n.scroll).is_some_and(|s| s.stick_bottom);
             let Some(st) = self.scrolls.get_mut(&id) else { continue };
             st.direct = true;
@@ -210,6 +212,16 @@ pub(super) fn glide_axis(spring: Spring, offset: &mut f64, glide: &mut Option<f3
 const NUDGE_FRAMES: u8 = 2;
 
 impl ScrollState {
+    /// The content's layout moved up `by` points (its virtual list's origin moved down `by`):
+    /// every vertical offset held moves with it, so the same content stays in view.
+    pub(super) fn rebase(&mut self, by: f64) {
+        self.offset -= by;
+        self.max -= by;
+        if let Some(to) = &mut self.glide_to { *to -= by; }
+        if let Some(end) = &mut self.laid { *end -= by; }
+        self.drawn[1] -= by as f32;
+    }
+
     /// The spring the running glide steps on.
     pub(super) fn glide_spring(&self) -> Spring {
         self.spring.unwrap_or(motion::GLIDE)
@@ -223,6 +235,28 @@ impl ScrollState {
 }
 
 impl<S: 'static> Runtime<S> {
+    /// How far into its content scroll viewport `i`'s layout begins (its virtual list's origin):
+    /// what turns an offset its scroll state holds into one from the content's top.
+    pub(crate) fn origin_of(&self, i: usize) -> f64 {
+        crate::el::virtual_list::scroll_origin(&self.virtuals, &self.nodes[i].path)
+    }
+
+    /// Offset `to`, from the top of viewport `id`'s content, as its scroll state holds it: from
+    /// its layout's origin. A spot above the origin lowers it first, which the commit that mounts
+    /// the rows there lays out.
+    pub(super) fn laid_offset(&mut self, id: NodeId, to: f64) -> f64 {
+        if self.virtuals.is_empty() { return to; }
+        let Self { nodes, node_index, virtuals, scrolls, .. } = self;
+        let Some(path) = node_index.get(&id).and_then(|&i| nodes.get(i)).map(|n| n.path.as_str()) else { return to };
+        let Some(v) = virtuals.values_mut().find(|v| v.scroll_path == path) else { return to };
+        if to < v.origin {
+            let lower = crate::el::virtual_list::origin_for((to - f64::from(v.top)).max(0.0));
+            if let Some(st) = scrolls.get_mut(&id) { st.rebase(lower - v.origin); }
+            v.origin = lower;
+        }
+        to - v.origin
+    }
+
     /// Counts down, once a frame, the frames an app's instant scrolls hold hover for. Returns
     /// whether one still holds, which asks for the frame that lets go.
     pub(super) fn step_nudges(&mut self) -> bool {
