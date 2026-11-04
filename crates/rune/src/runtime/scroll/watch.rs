@@ -26,8 +26,9 @@ impl<S: 'static> Runtime<S> {
         let mut calls = Vec::new();
         for n in &self.nodes {
             let Some(f) = n.handlers.get().and_then(|h| h.on_scroll_offset.as_ref()) else { continue };
+            let origin = crate::el::virtual_list::scroll_origin(&self.virtuals, &n.path);
             let Some(st) = self.scrolls.get_mut(&n.id) else { continue };
-            let at = crate::ScrollPos { offset: [st.x.offset as f32, st.offset as f32 + st.slack.height()], max: [st.x.max as f32, st.max as f32],
+            let at = crate::ScrollPos { offset: [st.x.offset as f32, (st.offset + origin) as f32 + st.slack.height()], max: [st.x.max as f32, (st.max + origin) as f32],
                 viewport: [n.local.w, n.local.h] };
             let by = Rc::as_ptr(f) as *const () as usize;
             let by_hand = std::mem::take(&mut st.by_hand);

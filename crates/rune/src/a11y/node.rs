@@ -192,9 +192,12 @@ impl<S: 'static> Runtime<S> {
             shift = [shift[0] + x, shift[1] + y];
             node.set_transform(Affine::translate((-f64::from(x), -f64::from(y))));
             node.set_clips_children();
-            node.set_scroll_y(st.offset);
+            // From the content's top, as `SetScrollOffset` asks: the state counts from the
+            // layout's origin.
+            let origin = self.origin_of(i);
+            node.set_scroll_y(st.offset + origin);
             node.set_scroll_y_min(0.0);
-            node.set_scroll_y_max(st.max.max(0.0));
+            node.set_scroll_y_max(st.max.max(0.0) + origin);
             if st.x.max > 0.0 {
                 node.set_scroll_x(st.x.offset);
                 node.set_scroll_x_min(0.0);

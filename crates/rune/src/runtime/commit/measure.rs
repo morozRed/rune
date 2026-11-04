@@ -124,20 +124,21 @@ impl<S: 'static> Measurement<'_, S> {
             let sticky = scroll.scroll.unwrap().stick_bottom;
             let pinned = (settle && sticky) || st.as_ref().map_or(sticky, |s| s.pinned);
             let offset = if let Some(st) = st {
-                if !pinned { st.offset = (st.offset + f64::from(v.anchor_delta())).max(0.0); }
-                st.offset as f32
+                if !pinned { st.offset = (st.offset + v.anchor_delta()).max(0.0); }
+                st.offset
             } else { 0.0 };
             // Rows that shrank or went leave the offset past the end until scrolling clamps it;
             // what shows then is the end.
-            let offset = (offset - v.top).clamp(0.0, v.max_offset());
+            let offset = v.list_offset(offset).min(v.max_offset());
             let end = v.row_end(v.range.end);
             let mounted_height = (end - v.before).max(0.0);
+            let (pad_top, viewport) = (f64::from(v.pad_top), f64::from(v.viewport));
             // Never present a blank caused by an estimate. Expand and measure again first.
             retry |= if pinned {
-                v.range.start > 0 && mounted_height < v.viewport
+                v.range.start > 0 && mounted_height < viewport
             } else {
-                (v.range.start > 0 && offset < v.pad_top + v.before)
-                    || (v.range.end < v.keys.len() && offset + v.viewport > v.pad_top + end)
+                (v.range.start > 0 && offset < pad_top + v.before)
+                    || (v.range.end < v.keys.len() && offset + viewport > pad_top + end)
             };
         }
         retry
@@ -217,9 +218,10 @@ impl<S: 'static> Measurement<'_, S> {
     }
 
     /// `bound` is the most `el` can be tall (see [`crate::el::virtual_list::height_bound`]); `scroll`
-    /// is the scroll viewport `el` is the content of, whether it sticks to the bottom, and its bound.
+    /// is the scroll viewport `el` is the content of, whether it sticks to the bottom, its bound,
+    /// and whether it holds one virtual list only.
     #[allow(clippy::too_many_arguments)]
-    fn window_tree(&mut self, el: &mut El, parent: &str, index: usize, scroll: Option<(&str, bool, f32)>, tx: &Tx, force_all: bool, bound: f32, inert: bool, group: Option<&str>) {
+    fn window_tree(&mut self, el: &mut El, parent: &str, index: usize, scroll: Option<(&str, bool, f32, bool)>, tx: &Tx, force_all: bool, bound: f32, inert: bool, group: Option<&str>) {
         if !el.has_virtual {
             return;
         }
@@ -229,10 +231,10 @@ impl<S: 'static> Measurement<'_, S> {
         let path = node_path(parent, el.key.as_deref(), index);
         if let Some(estimate) = el.virtual_estimate {
             assert!(el.growth.is_some(), "`.virtualize(..)` at {path:?} needs `.growth(GrowthSpec)` on the same element");
-            let (scroll_path, sticky, scroll_bound) = scroll.expect("virtual stack must be the direct child of a scroll viewport");
+            let (scroll_path, sticky, scroll_bound, alone) = scroll.expect("virtual stack must be the direct child of a scroll viewport");
             let old_scroll = self.path_ids.get(scroll_path).and_then(|id| self.scrolls.get(id));
             let pinned = (tx.settle && sticky) || old_scroll.map_or(sticky, |s| s.pinned);
-            let mut offset = old_scroll.map_or(0.0, |s| s.offset as f32);
+            let scrolled = old_scroll.map_or(0.0, |s| s.offset);
             // A new viewport has no height yet: its bound from the tree, else the window's.
             let first = if scroll_bound.is_finite() { scroll_bound } else { self.viewport.1 };
             let height = self.committed_node(scroll_path).map_or(first, |i| self.nodes[i].local.h);
@@ -246,7 +248,8 @@ impl<S: 'static> Measurement<'_, S> {
             v.scroll_path = scroll_path.to_owned();
             // A retry keeps the viewport the last pass measured; `self.nodes` is the last commit's.
             if !self.retry { v.viewport = height; }
-            offset = (offset - v.top).max(0.0);
+            let (origin, mut offset) = (v.origin, v.list_offset(scrolled));
+            v.alone = alone;
             let el_pad = el.style.padding();
             v.pad_top = padding(el_pad.top);
             v.pad_bottom = padding(el_pad.bottom);
@@ -308,7 +311,7 @@ impl<S: 'static> Measurement<'_, S> {
             let delta = v.anchor_delta();
             offset = (offset + delta).max(0.0);
             if let Some(st) = self.path_ids.get(scroll_path).and_then(|id| self.scrolls.get_mut(id)) {
-                if !pinned { st.offset = (st.offset + f64::from(delta)).max(0.0); }
+                if !pinned { st.offset = (st.offset + delta).max(0.0); }
             }
             // Rows new since the last commit spread over frames, unless this pass is a retry to
             // fill the viewport or a settle. A list's first showing is all new rows: it mounts
@@ -323,18 +326,22 @@ impl<S: 'static> Measurement<'_, S> {
             } else {
                 v.select(offset, pinned, budget.then_some(&shown));
             }
-            if force_all { v.range = 0..v.keys.len(); v.before = 0.0; v.after = 0.0; }
+            if force_all { v.mount_all(); }
+            if v.origin != origin && let Some(st) = self.path_ids.get(scroll_path).and_then(|id| self.scrolls.get_mut(id)) {
+                st.rebase(v.origin - origin);
+            }
             // Keys are unique, so a key is mounted when its row's index is in the range.
             for key in shown.iter().filter(|k| v.index_of(k).is_some_and(|i| !v.range.contains(&i))) {
                 self.virtual_culled.insert(format!("{path}/{key}"));
             }
             v.shown = shown;
-            el.style.set_pad_top(v.pad_top + v.before);
-            el.style.set_pad_bottom(v.pad_bottom + v.after);
+            el.style.set_pad_top(v.pad_top + v.laid_before());
+            el.style.set_pad_bottom(v.pad_bottom + v.after as f32);
             self.populate_virtual_children(el, &path, source, inert, group);
         }
         let bounds = crate::el::virtual_list::child_bounds(&el.style, el.scroll.is_some(), bound, &el.children);
-        let scroll = el.scroll.map(|s| (path.as_str(), s.stick_bottom, bound));
+        let alone = el.children.iter().filter(|c| c.virtual_estimate.is_some()).count() == 1;
+        let scroll = el.scroll.map(|s| (path.as_str(), s.stick_bottom, bound, alone));
         let child_group = if el.selection_group { Some(path.as_str()) } else { group };
         for (i, child) in el.children.iter_mut().enumerate() {
             if !child.has_virtual { continue; }

@@ -99,7 +99,7 @@ impl<S: 'static> Runtime<S> {
             if !self.virtuals.is_empty()
                 && let Some(v) = r_new.parent.and_then(|p| self.virtuals.get(&nodes[p].path))
             {
-                scene_rect.y -= v.before;
+                scene_rect.y -= v.laid_before();
             }
             let parent_top_clean = r_new.in_row != RowLayout::Snaps
                 || r_new.parent.is_none_or(|p| {
@@ -108,7 +108,7 @@ impl<S: 'static> Runtime<S> {
                         if !self.virtuals.is_empty()
                             && let Some(v) = self.virtuals.get(&nodes[p].path)
                         {
-                            sr.y -= v.before;
+                            sr.y -= v.laid_before();
                         }
                         self.scene.get(first_sib.id, prop::FRAME) == Some(sr)
                     })
