@@ -155,12 +155,19 @@ pub use motion_elements::MotionElement;
 mod live_latch;
 #[path = "runtime/motion/loop_clock.rs"]
 mod loop_clock;
+#[path = "runtime/motion/rewind.rs"]
+mod rewind_record;
 #[path = "runtime/scroll/watch.rs"]
 mod scroll_watch;
 #[doc(hidden)]
 pub use scroll_watch::scroll_watch_state;
 #[path = "runtime/input/gesture.rs"]
 mod gesture_dispatch;
+#[path = "runtime/input/touch.rs"]
+mod touch_input;
+pub use touch_input::TouchPhase;
+#[path = "runtime/scroll/touch.rs"]
+mod scroll_touch;
 #[path = "runtime/motion/flights.rs"]
 mod flights;
 #[path = "runtime/paint/text_flights.rs"]
@@ -182,6 +189,8 @@ mod secondary;
 mod app_ime;
 #[path = "runtime/input/press_clicks.rs"]
 mod press_clicks;
+#[path = "runtime/input/press_repeat.rs"]
+mod press_repeat;
 #[path = "runtime/input/titlebar.rs"]
 mod titlebar;
 #[path = "runtime/window_requests.rs"]
@@ -216,6 +225,9 @@ mod timer_wake_tests;
 #[cfg(test)]
 #[path = "runtime/truncate_tests.rs"]
 mod truncate_tests;
+#[cfg(test)]
+#[path = "runtime/truncate_fade_tests.rs"]
+mod truncate_fade_tests;
 #[cfg(test)]
 #[path = "runtime/line_clamp_tests.rs"]
 mod line_clamp_tests;
@@ -506,11 +518,13 @@ pub struct Runtime<S: 'static> {
     scrolls: HashMap<NodeId, ScrollState>,
     /// The axis the current wheel or trackpad gesture scrolls (`runtime/scroll/x.rs`).
     wheel_lock: scroll_x::WheelLock,
-    #[cfg(any(test, target_arch = "wasm32"))]
-    web_scroll: Option<web_runtime::TouchScroll>,
+    /// The finger that is down and the viewport a touch holds (`runtime/input/touch.rs`).
+    touch: touch_input::Touch,
     grows: HashMap<NodeId, GrowTrack>,
     stacks: HashMap<NodeId, Stack>,
     pub(crate) virtuals: HashMap<String, crate::el::virtual_list::VirtualList>,
+    /// The recorder `Tx::record_rewind` attached (`runtime/motion/rewind.rs`).
+    rewind: Option<crate::rewind::Rewind>,
     /// The memo pass the current commit's first view build was. Memos none of its builds used
     /// go once it applies.
     memo_since: u64,
@@ -523,6 +537,8 @@ pub struct Runtime<S: 'static> {
     /// Fresh view accessors for focused text fields omitted by virtualization.
     virtual_inputs: HashMap<String, Box<InputSpec>>,
     reveals: HashMap<NodeId, RevealState>,
+    /// When the newest streamed word of any text starts fading: the next text's words follow it.
+    reveal_chain: f64,
     flights: Vec<TextFlight>,
     /// Per node index this frame: presented row top dy, row height override, and bottom feather mask.
     row_dy: Vec<f32>,
@@ -738,6 +754,8 @@ pub struct Runtime<S: 'static> {
     double_armed: bool,
     /// The presses counted into `Drag::clicks`.
     press_clicks: press_clicks::PressClicks,
+    /// The held press's drag repeat (`Tx::drag_repeat_after`).
+    press_repeat: press_repeat::PressRepeat,
     press_down_t: f64,
     /// The held press has travelled past the click slop: it isn't a click of a double press.
     press_moved: bool,
@@ -882,11 +900,11 @@ impl<S: 'static> Runtime<S> {
             seen: Vec::new(),
             scrolls: HashMap::default(),
             wheel_lock: Default::default(),
-            #[cfg(any(test, target_arch = "wasm32"))]
-            web_scroll: None,
+            touch: Default::default(),
             grows: HashMap::default(),
             stacks: HashMap::default(),
             virtuals: HashMap::default(),
+            rewind: None,
             virtual_culled: HashSet::default(),
             memo_since: 0,
             virtual_fill: 0,
@@ -894,6 +912,7 @@ impl<S: 'static> Runtime<S> {
             reuse: Default::default(),
             virtual_inputs: HashMap::default(),
             reveals: HashMap::default(),
+            reveal_chain: 0.0,
             flights: Vec::new(),
             launches: Default::default(),
             pixel_snap: Default::default(),
@@ -1016,6 +1035,7 @@ impl<S: 'static> Runtime<S> {
             last_press: None,
             double_armed: false,
             press_clicks: Default::default(),
+            press_repeat: Default::default(),
             press_down_t: 0.0,
             press_moved: false,
             press_cancelled: false,

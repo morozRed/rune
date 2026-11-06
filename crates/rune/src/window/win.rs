@@ -216,8 +216,22 @@ impl Win {
             }
             if !focus { crate::platform::macos::show_without_focus(&self.window); return; }
         }
+        // What it presented before it was hidden is gone, or never was: cloaked until it draws.
+        #[cfg(target_os = "windows")]
+        {
+            self.native.cloak.hold(&self.window, Instant::now() + READY_FALLBACK);
+            self.window.request_redraw();
+        }
         self.window.set_visible(true);
         if focus { self.window.focus_window(); }
+    }
+
+    /// When a cloaked window shows without its frame.
+    pub(super) fn cloak_deadline(&self) -> Option<Instant> {
+        #[cfg(target_os = "windows")]
+        return self.native.cloak.deadline();
+        #[cfg(not(target_os = "windows"))]
+        None
     }
 
     pub(super) fn hide(&self) {
@@ -228,6 +242,9 @@ impl Win {
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.native.panel { panel.hide(std::time::Duration::ZERO); return; }
         self.window.set_visible(false);
+        // Hidden before its frame: the next show cloaks it again.
+        #[cfg(target_os = "windows")]
+        self.native.cloak.lift(&self.window);
     }
 
     /// Its last frame is on screen and nothing has asked for another since.

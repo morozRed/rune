@@ -3385,6 +3385,7 @@ dependencies = [
  "rune",
  "rune-mermaid",
  "rune-motion",
+ "rune-ref",
  "rune-theme-opencode",
  "serde_json",
  "unicode-segmentation",
@@ -3682,6 +3683,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "showreel"
+version = "0.0.1"
+dependencies = [
+ "rune",
+ "rune-fx",
+ "rune-motion",
+ "wgpu",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3727,6 +3738,16 @@ name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
+
+[[package]]
+name = "site-scenes"
+version = "0.0.1"
+dependencies = [
+ "rune",
+ "rune-fx",
+ "rune-light",
+ "wgpu",
+]
 
 [[package]]
 name = "sketch"
@@ -4610,6 +4631,14 @@ dependencies = [
 
 [[package]]
 name = "web-hello"
+version = "0.0.1"
+dependencies = [
+ "rune",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "web-showcase"
 version = "0.0.1"
 dependencies = [
  "rune",

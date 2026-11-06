@@ -47,6 +47,7 @@ pub mod native_surface;
 pub mod playground;
 pub mod prefs;
 pub mod render;
+pub mod rewind;
 pub mod runtime;
 pub mod shape;
 pub mod text;
@@ -145,6 +146,7 @@ pub use frame::surface_stats::Pacing;
 pub use frame::surface_stats::SurfaceCounts;
 pub use frame::surface_stats::SurfaceStats;
 pub use gpu::backend::GpuBackend;
+pub use gpu::backend::describe as describe_gpu;
 #[cfg(all(target_vendor = "apple", feature = "metal-backend"))]
 #[doc(hidden)]
 pub use gpu::metal::bench::dispatch_overhead as __metal_dispatch_overhead;
@@ -205,6 +207,7 @@ pub use platform::scroll_bars::ScrollBars;
 #[doc(hidden)]
 pub use platform::scroll_bars::current_runtime_id;
 pub use platform::scroll_bars::system_scroll_bars;
+pub use platform::scroll_bars::system_scroller_jumps;
 pub use platform::scroll_bars::system_scroller_overlay;
 #[cfg(target_arch = "wasm32")]
 pub use platform::web;
@@ -272,6 +275,7 @@ pub use runtime::SelectedText;
 pub use runtime::SelectionChange;
 pub use runtime::TextSelection;
 pub use runtime::TitlebarAction;
+pub use runtime::TouchPhase;
 pub use runtime::Waker;
 pub use runtime::commit_generation;
 #[doc(hidden)]

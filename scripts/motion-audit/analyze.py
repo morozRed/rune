@@ -52,6 +52,7 @@ SEG_GAP = 2
 STALL_PT = 0.5
 STALL_SHARE = 0.25
 MIN_AREA = 1.0
+ANIMATED = 1  # flags: a motion of its own (a spring, a stack, a loop) moves it this frame
 SCROLLING = 4  # flags: under a scroll viewport whose offset moved this frame
 BLANK = 64  # flags: draws nothing and holds nothing (a hit or hover zone, a spacer)
 SETTLE_TAIL_MS = 250.0  # a motion's own sub-visible tail after it hides what it moves
@@ -290,6 +291,9 @@ def analyze(path, script=None):
         return min(bisect.bisect_left(t_ms, t * 1000.0 - 0.01), n - 1)
 
     input_frames = sorted({frame_of(t) for a in acts for t in a["times"]} | {k for k, _ in inputs})
+    # A wheel step or fling sets the scroll's speed itself, so what moves with the scroll without
+    # riding it (a scroll bar's thumb) slows and picks up with the hand, not at a lost retarget.
+    wheeled = {k for k, ev in inputs if ev.startswith(("wheel", "fling"))}
 
     def interrupted(k0, k1):
         """An input landed mid-motion (a retarget may turn it around)."""
@@ -474,15 +478,41 @@ def analyze(path, script=None):
     # destination without a key. Judge each destination separately; jumps still span updates.
     goals = [{row[0]: row[1:] for row in fr.get("retarget", [])} for fr in frames]
 
+    # What sits in a scroll area without scrolling (a scroll bar's thumb) reads the content's
+    # length, so a destination the content changes is a destination it changes too.
+    scrolls = {e.name for e in els.values() if any(st[9] or st[10] for st in e.hist)}
+    traced = {e.name for e in els.values()}
+    viewports = set()
+    for name in scrolls:
+        parts = name.split("/")
+        for i in range(len(parts) - 1, 0, -1):
+            p = "/".join(parts[:i])
+            if p in traced and p not in scrolls:
+                viewports.add(p)
+                break
+    # A scroll bar sits beside its viewport, in the same area.
+    areas = viewports | {v.rpartition("/")[0] for v in viewports}
+    over = {}
+
+    def scroll_area(e):
+        if e.id not in over:
+            a = None if e.name in scrolls else els.get(e.parent)
+            while a and a.name not in areas:
+                a = els.get(a.parent)
+            over[e.id] = a.name + "/" if a else None
+        return over[e.id]
+
     def retargeted(e, k, mask):
-        own = True
+        own, start = True, e
         while e:
             change = goals[k].get(e.id)
             if change and change[0 if own else 1] & mask:
                 return True
             own = False
             e = els.get(e.parent)
-        return False
+        area_ = scroll_area(start)
+        return bool(area_) and any(id in els and els[id].name.startswith(area_) and els[id].name in scrolls
+                                   for id, change in goals[k].items() if change[0] | change[1])
 
     def braking(e, h, seg, edge, vals):
         """A retarget preserves incoming velocity. Its first turn is braking, not a wind-up,
@@ -589,6 +619,12 @@ def analyze(path, script=None):
                     if any(pressing[h[j][0]] or h[j][6] & BLANK for j in seg):
                         seg = []
                         continue
+                    # Placed where it belongs every frame, declared instant and never springing:
+                    # a readout of something else (a scroll bar's thumb showing the offset over
+                    # the length as the list re-anchors), whose path is that thing's, judged there.
+                    if all((h[j][6] >> 8) & (1 if edge <= 2 else 2) and not h[j][6] & ANIMATED for j in seg):
+                        seg = []
+                        continue
                     rest = vals[-1]
                     start = vals[0]
                     travel = rest - start
@@ -618,7 +654,7 @@ def analyze(path, script=None):
                                                  detail=what))
                     if len(findings) == found and abs(travel) > 0.5:
                         stall = stalled(theirs, edge, [h[seg[0] - 1]] + [h[j] for j in seg], travel)
-                        if stall:
+                        if stall and not wheeled & {stall[0] - 1, stall[0], stall[0] + 1}:
                             k, u = stall
                             findings.append(dict(kind="stall", element=e.name, frames=1, longest=1, at=str(k),
                                                  detail=f"{label} speed {u[0]:.1f} → {u[1]:.1f} → {u[2]:.1f} pt/frame ({start:.1f} → {rest:.1f})"))
@@ -638,6 +674,8 @@ def analyze(path, script=None):
                 continue
             if len(seg) >= 4:
                 pts = [h[seg[0] - 1]] + [h[j] for j in seg]
+                # The route starts where a retarget's braking ends, as the edges' checks do.
+                pts = pts[max(len(pts) - len(braking(e, h, seg, edge, [p[edge] for p in pts])) for edge in (1, 2)):]
                 k0, k1 = pts[1][0], pts[-1][0]
                 hidden = all(p[5] <= 0.05 or not p[8] for p in pts)
                 held = any(pressing[p[0]] or p[6] & (4 | BLANK) for p in pts)
