@@ -9,6 +9,7 @@ mod event_markers;
 mod fold_glide;
 mod glyph_replay;
 mod group_opacity;
+mod huge_virtual;
 mod id_pruning;
 mod input_clipboard;
 mod layout_hover;

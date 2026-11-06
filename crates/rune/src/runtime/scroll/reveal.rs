@@ -47,8 +47,10 @@ impl<S: 'static> Runtime<S> {
             if !window { break; }
             window = self.reveal_row_once(scope, key, r.center, false, instant || glide).0;
         }
+        let origin = was.as_ref().and_then(|w| self.node_index.get(&w.id)).map_or(0.0, |&i| self.origin_of(i));
         if glide && let Some(Was { id, offset: start, glide: v, viewport }) = was
             && let Some(st) = self.scrolls.get_mut(&id)
+            && let start = start - origin
             && (st.offset - start).abs() > 0.5
         {
             // A long trip cuts to a couple of viewports out first, as `Tx::scroll_to` does.
@@ -109,7 +111,7 @@ impl<S: 'static> Runtime<S> {
                 })
                 .unwrap_or((laid_top, laid_h));
             let laid_end = self.scroll_children(s).map(|c| self.nodes[c].target[3] - parent.target[1]).reduce(f32::max).unwrap_or(0.0);
-            Some((parent.path.clone(), f64::from(top), f64::from(height), f64::from(parent.local.h), f64::from(laid_top), f64::from(laid_h), f64::from(laid_end)))
+            Some((parent.path.clone(), f64::from(top), f64::from(height), f64::from(parent.local.h), f64::from(laid_top), f64::from(laid_h), f64::from(laid_end), false))
         }).or_else(|| {
             self.nodes.iter().filter(|n| in_scope(&n.path, scope)).filter_map(|n| {
                 let v = self.virtuals.get(&n.path)?;
@@ -123,14 +125,16 @@ impl<S: 'static> Runtime<S> {
                     // `"row/mark"` names an element or highlight inside unmounted row `row`.
                     key.match_indices('/').find_map(|(at, _)| v.index_of(&key[..at]))
                 })?;
+                // From the content's top: the scroll state counts from the layout's origin, which
+                // this row may lie above.
                 let row_key = &v.keys.key(index);
-                let top = f64::from(v.top + v.pad_top + v.prefix(index));
+                let top = f64::from(v.top + v.pad_top) + v.prefix(index);
                 let height = f64::from(v.height(row_key));
-                let end = f64::from(v.top + v.pad_top + v.prefix(v.keys.len()) + v.pad_bottom);
-                Some((v.scroll_path.clone(), top, height, f64::from(v.viewport), top, height, end))
+                let end = f64::from(v.top + v.pad_top + v.pad_bottom) + v.prefix(v.keys.len());
+                Some((v.scroll_path.clone(), top, height, f64::from(v.viewport), top, height, end, true))
             }).next()
         });
-        let Some((path, top, height, viewport, laid_top, laid_h, laid_end)) = geometry else { return (false, None) };
+        let Some((path, top, height, viewport, laid_top, laid_h, laid_end, unmounted)) = geometry else { return (false, None) };
         // Stuck headers cover the viewport's top: land the row below them.
         let Some(cover) = self.stuck_cover(&path, key) else { return (false, None) };
         let (top, height) = (top - cover, height + cover);
@@ -139,9 +143,13 @@ impl<S: 'static> Runtime<S> {
         let Some(&id) = self.path_ids.get(&path) else { return (false, None) };
         let Some(&s_idx) = self.node_index.get(&id) else { return (false, None) };
         let stick = self.nodes[s_idx].scroll.is_some_and(|s| s.stick_bottom);
-        let max = self.scroll_overflow(s_idx).max(0.0);
+        let laid = self.origin_of(s_idx);
+        let by = if unmounted { top - self.laid_offset(id, top) } else { 0.0 };
+        let (top, laid_top, laid_end) = (top - by, laid_top - by, laid_end - by);
+        let origin = self.origin_of(s_idx);
+        let max = self.scroll_overflow(s_idx).max(0.0) + laid - origin;
         let Some(scroll) = self.scrolls.get_mut(&id) else { return (false, None) };
-        let was = first.then_some(Was { id, offset: scroll.offset, glide: scroll.glide, viewport });
+        let was = first.then_some(Was { id, offset: scroll.offset + origin, glide: scroll.glide, viewport });
         scroll.max = max;
         if first {
             scroll.v = 0.0;
@@ -194,6 +202,7 @@ impl<S: 'static> Runtime<S> {
 /// Where a reveal's viewport stood before it moved, for the glide that follows.
 struct Was {
     id: NodeId,
+    /// From the content's top: the commits on the way can move the layout's origin.
     offset: f64,
     glide: Option<f32>,
     viewport: f64,

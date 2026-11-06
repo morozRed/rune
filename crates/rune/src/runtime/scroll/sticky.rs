@@ -548,15 +548,16 @@ impl<S: 'static> Runtime<S> {
                     && let Some(v) = self.virtuals.get(v_path)
                     && let Some(idx) = v.index_of(row_key)
                 {
-                    f64::from(v.top + v.pad_top + v.prefix(idx) + *in_row)
+                    f64::from(v.top + v.pad_top + *in_row) + v.prefix(idx)
                 } else {
                     continue;
                 };
                 let stick = self.nodes[s].scroll.is_some_and(|sc| sc.stick_bottom);
                 let id = self.nodes[s].id;
+                let to = self.laid_offset(id, laid - f64::from(k.was));
                 let Some(st) = self.scrolls.get_mut(&id) else { continue };
                 st.direct = true;
-                let to = (laid - f64::from(k.was)).clamp(0.0, st.max);
+                let to = to.clamp(0.0, st.max);
                 if pass > 0 && (to - st.offset).abs() < 0.5 { continue; }
                 st.v = 0.0;
                 st.glide = None;

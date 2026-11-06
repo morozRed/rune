@@ -52,6 +52,8 @@ impl Mirror {
 
 pub(super) struct TouchScroll {
     id: NodeId,
+    /// The offset the touch went down at, from the content's top: a virtual list's layout
+    /// origin can move mid-pan.
     origin: f64,
     dragging: bool,
     /// The pan moves the viewport's horizontal axis (`El::scroll_x`).
@@ -302,10 +304,11 @@ impl<S: 'static> Runtime<S> {
             _ => false,
         };
         let id = self.scroll_at(x, y)?;
+        let laid = self.node_index.get(&id).map_or(0.0, |&i| self.origin_of(i));
         let st = self.scrolls.get_mut(&id)?;
         st.v = 0.0;
         st.glide = None;
-        if !caught { self.web_scroll = Some(TouchScroll { id, origin: st.offset, dragging: true, horizontal: false }); }
+        if !caught { self.web_scroll = Some(TouchScroll { id, origin: st.offset + laid, dragging: true, horizontal: false }); }
         Some(id)
     }
 
@@ -322,8 +325,9 @@ impl<S: 'static> Runtime<S> {
         // A horizontal viewport the touch caught lets go, and the vertical one takes the pan.
         if self.web_scroll.as_ref().is_some_and(|t| t.horizontal) {
             if let Some(t) = &mut self.web_scroll { t.dragging = false; }
+            let laid = vertical.and_then(|id| self.node_index.get(&id)).map_or(0.0, |&i| self.origin_of(i));
             if let Some(id) = vertical && let Some(st) = self.scrolls.get(&id) {
-                self.web_scroll = Some(TouchScroll { id, origin: st.offset, dragging: true, horizontal: false });
+                self.web_scroll = Some(TouchScroll { id, origin: st.offset + laid, dragging: true, horizontal: false });
             }
         }
         (vertical, false)
@@ -334,6 +338,8 @@ impl<S: 'static> Runtime<S> {
         let Some(touch) = &self.web_scroll else { return };
         if touch.id != id { return; }
         let (origin, horizontal) = (touch.origin, touch.horizontal);
+        let laid = if horizontal { 0.0 } else { self.node_index.get(&id).map_or(0.0, |&i| self.origin_of(i)) };
+        let origin = origin - laid;
         let Some(st) = self.scrolls.get_mut(&id) else { return };
         let (offset, _, max) = st.axis(horizontal);
         let to = origin - f64::from(d);

@@ -203,7 +203,7 @@ fn a_narrowing_window_lets_go_of_rows_the_overscan_no_longer_holds() {
     for w in (1..=80).map(|k| 700.0 - 5.0 * k as f32) {
         ran += resize(&mut rt, w, 2.0);
         let v = &rt.virtuals["#0/scroll/rows"];
-        let offset = rt.scrolls[&rt.path_ids["#0/scroll"]].offset as f32 - v.top;
+        let offset = v.list_offset(rt.scrolls[&rt.path_ids["#0/scroll"]].offset);
         assert!(v.spare(offset, false) <= v.viewport, "at {w}");
     }
     assert!((1..20).contains(&ran), "the view ran {ran} times in 80 steps");

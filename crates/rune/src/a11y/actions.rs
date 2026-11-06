@@ -163,7 +163,7 @@ impl<S: 'static> Runtime<S> {
                     let r = self.drawn[i];
                     let (dx, dy) = if pages { (r[2] * 0.9, r[3] * 0.9) } else { (LINE, LINE) };
                     let nx = st.x.offset as f32 + dx * x as f32;
-                    let ny = st.offset as f32 + dy * y as f32;
+                    let ny = (st.offset + self.origin_of(i)) as f32 + dy * y as f32;
                     tx.scroll_to_instant(path, nx, ny);
                 }
                 true
